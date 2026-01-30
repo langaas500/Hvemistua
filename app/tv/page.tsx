@@ -17,6 +17,7 @@ type QuestionTone = 'mild' | 'spicy' | 'drøy';
 type GameMode = 'standard' | '18+';
 type CheckoutStatus = 'open' | 'paid' | 'canceled';
 type GroupSize = 'small' | 'medium' | 'large';
+type AudioTrack = 'lobby' | 'pause' | 'sporsmal' | null;
 
 interface Checkout {
   id: string;
@@ -108,6 +109,13 @@ const INTERSTITIAL_TIME = 1000;
 const REVEAL_HOLD_TIME = 5000;
 const MAX_PLAYERS = 12;
 const MIN_PLAYERS = 3;
+const AUDIO_VOLUME = 0.2;
+
+const TRACK_SOURCES: Record<Exclude<AudioTrack, null>, string> = {
+  lobby: '/lobby.mp3',
+  pause: '/pause.mp3',
+  sporsmal: '/sporsmal.mp3',
+};
 
 // Subtle color variants for empty slots (same hue family, 8-12% opacity)
 const EMPTY_SLOT_COLORS = [
@@ -158,6 +166,12 @@ export default function TVPage() {
   const [localCouplesSafe, setLocalCouplesSafe] = useState(false);
   const [localGameMode, setLocalGameMode] = useState<GameMode>('standard');
 
+  // Audio state
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const [audioUnlocked, setAudioUnlocked] = useState(false);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const currentTrackRef = useRef<AudioTrack>(null);
+
   const hasEndedRef = useRef(false);
   const currentQuestionRef = useRef<number>(-1);
   const revealTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -165,6 +179,120 @@ export default function TVPage() {
 
   // Get dynamic question time from state
   const questionTime = state?.questionTime ?? DEFAULT_QUESTION_TIME;
+
+  // Initialize audio element on mount
+  useEffect(() => {
+    if (typeof window !== 'undefined') {
+      const audio = new Audio();
+      audio.volume = AUDIO_VOLUME;
+      audio.loop = true;
+      audioRef.current = audio;
+    }
+
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current.src = '';
+        audioRef.current = null;
+      }
+    };
+  }, []);
+
+  // Unlock audio (must be called from user gesture)
+  const unlockAudio = useCallback(() => {
+    if (audioUnlocked || !audioRef.current) return;
+
+    const audio = audioRef.current;
+    audio.src = TRACK_SOURCES.lobby;
+    audio.play()
+      .then(() => {
+        audio.pause();
+        audio.currentTime = 0;
+        setAudioUnlocked(true);
+      })
+      .catch(() => {
+        // Fail silently if autoplay is blocked
+      });
+  }, [audioUnlocked]);
+
+  // Play a specific track
+  const playTrack = useCallback((track: AudioTrack) => {
+    if (!soundEnabled || !audioUnlocked || !audioRef.current) return;
+    if (track === currentTrackRef.current) return;
+    if (track === null) {
+      audioRef.current.pause();
+      currentTrackRef.current = null;
+      return;
+    }
+
+    const audio = audioRef.current;
+    audio.pause();
+    audio.src = TRACK_SOURCES[track];
+    audio.currentTime = 0;
+    audio.play().catch(() => {
+      // Fail silently
+    });
+    currentTrackRef.current = track;
+  }, [soundEnabled, audioUnlocked]);
+
+  // Stop audio
+  const stopAudio = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      currentTrackRef.current = null;
+    }
+  }, []);
+
+  // Get the correct track for current phase
+  const getTrackForPhase = useCallback((phase: string | undefined, isPaused: boolean): AudioTrack => {
+    if (isPaused) return 'pause';
+    switch (phase) {
+      case 'lobby':
+        return 'lobby';
+      case 'question':
+      case 'reveal':
+        return 'sporsmal';
+      case 'gameover':
+        return 'lobby';
+      default:
+        return null;
+    }
+  }, []);
+
+  // React to phase and pause changes
+  useEffect(() => {
+    if (!state) return;
+    const targetTrack = getTrackForPhase(state.phase, state.isPaused);
+    if (soundEnabled && audioUnlocked) {
+      playTrack(targetTrack);
+    }
+  }, [state?.phase, state?.isPaused, soundEnabled, audioUnlocked, playTrack, getTrackForPhase, state]);
+
+  // Handle sound toggle
+  const handleSoundToggle = useCallback(() => {
+    if (!soundEnabled) {
+      // Enabling sound
+      unlockAudio();
+      setSoundEnabled(true);
+      // Will play correct track via effect above once audioUnlocked becomes true
+      if (audioUnlocked && state) {
+        const targetTrack = getTrackForPhase(state.phase, state.isPaused);
+        playTrack(targetTrack);
+      }
+    } else {
+      // Disabling sound
+      stopAudio();
+      setSoundEnabled(false);
+    }
+  }, [soundEnabled, unlockAudio, audioUnlocked, state, getTrackForPhase, playTrack, stopAudio]);
+
+  // When audioUnlocked becomes true and sound is enabled, start playing
+  useEffect(() => {
+    if (audioUnlocked && soundEnabled && state) {
+      const targetTrack = getTrackForPhase(state.phase, state.isPaused);
+      playTrack(targetTrack);
+    }
+  }, [audioUnlocked, soundEnabled, state, getTrackForPhase, playTrack]);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -295,6 +423,7 @@ export default function TVPage() {
   };
 
   const handleGameModeChange = async (mode: GameMode) => {
+    unlockAudio();
     setLocalGameMode(mode);
     await fetch('/api/game', {
       method: 'POST',
@@ -309,6 +438,7 @@ export default function TVPage() {
   };
 
   const handleCreateCheckout = async () => {
+    unlockAudio();
     const res = await fetch('/api/game', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -324,6 +454,7 @@ export default function TVPage() {
   };
 
   const startGame = async () => {
+    unlockAudio();
     setStartError('');
     const res = await fetch('/api/game', {
       method: 'POST',
@@ -369,6 +500,7 @@ export default function TVPage() {
   };
 
   const resetGame = async () => {
+    unlockAudio();
     if (revealTimerRef.current) clearTimeout(revealTimerRef.current);
     if (interstitialTimerRef.current) clearTimeout(interstitialTimerRef.current);
     revealTimerRef.current = null;
@@ -389,6 +521,7 @@ export default function TVPage() {
   };
 
   const resetToLobby = async () => {
+    unlockAudio();
     if (revealTimerRef.current) clearTimeout(revealTimerRef.current);
     if (interstitialTimerRef.current) clearTimeout(interstitialTimerRef.current);
     revealTimerRef.current = null;
@@ -407,6 +540,7 @@ export default function TVPage() {
   };
 
   const start18PlusRound = () => {
+    unlockAudio();
     if (!state?.unlockInfo?.unlocked) {
       handleGameModeChange('18+');
     } else {
@@ -430,6 +564,7 @@ export default function TVPage() {
   };
 
   const handlePause = async () => {
+    unlockAudio();
     await fetch('/api/game', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -444,6 +579,7 @@ export default function TVPage() {
   };
 
   const handleResume = async () => {
+    unlockAudio();
     await fetch('/api/game', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -459,6 +595,7 @@ export default function TVPage() {
   };
 
   const handleNextQuestionNow = async () => {
+    unlockAudio();
     if (revealTimerRef.current) {
       clearTimeout(revealTimerRef.current);
       revealTimerRef.current = null;
@@ -487,9 +624,24 @@ export default function TVPage() {
     ? `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(checkoutUrl)}`
     : '';
 
+  // Sound toggle button component
+  const SoundToggle = () => (
+    <button
+      onClick={handleSoundToggle}
+      className={`fixed top-4 right-4 z-50 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+        soundEnabled
+          ? 'bg-purple-600/80 text-white hover:bg-purple-700/80'
+          : 'bg-gray-800/80 text-gray-400 hover:bg-gray-700/80'
+      }`}
+    >
+      {soundEnabled ? '🔊 Lyd' : '🔇 Lyd av'}
+    </button>
+  );
+
   if (!state) {
     return (
       <TVLayout>
+        <SoundToggle />
         <p className="text-xl text-gray-300 text-center">Laster...</p>
       </TVLayout>
     );
@@ -513,6 +665,7 @@ export default function TVPage() {
             <div className="flex gap-3">
               <button
                 onClick={() => {
+                  unlockAudio();
                   setActiveModal('none');
                   setLocalGameMode('standard');
                   fetch('/api/game', {
@@ -588,6 +741,7 @@ export default function TVPage() {
 
             <button
               onClick={() => {
+                unlockAudio();
                 setActiveModal('none');
                 setCheckoutUrl('');
                 if (!state?.unlockInfo?.unlocked) {
@@ -615,6 +769,7 @@ export default function TVPage() {
   if (tvOverlay === 'interstitial') {
     return (
       <TVLayout>
+        <SoundToggle />
         <div className="flex flex-col items-center justify-center py-12">
           <h1
             className="text-5xl md:text-7xl font-bold text-white animate-pulse"
@@ -647,6 +802,7 @@ export default function TVPage() {
 
     return (
       <>
+        <SoundToggle />
         {renderModal()}
         <TVLayout wide>
           <h1
@@ -844,6 +1000,7 @@ export default function TVPage() {
 
     return (
       <TVLayout>
+        <SoundToggle />
         {/* Pause overlay */}
         {state.isPaused && (
           <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-40 rounded-2xl">
@@ -911,6 +1068,7 @@ export default function TVPage() {
 
     return (
       <TVLayout>
+        <SoundToggle />
         {/* Pause overlay */}
         {state.isPaused && (
           <div className="absolute inset-0 bg-black/60 flex items-center justify-center z-40 rounded-2xl">
@@ -1026,6 +1184,7 @@ export default function TVPage() {
 
     return (
       <>
+        <SoundToggle />
         {renderModal()}
         <TVLayout wide>
           <h1
@@ -1111,6 +1270,7 @@ export default function TVPage() {
 
   return (
     <TVLayout>
+      <SoundToggle />
       <p className="text-xl text-gray-300 text-center">Laster resultat...</p>
     </TVLayout>
   );
