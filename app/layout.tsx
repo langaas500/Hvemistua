@@ -9,7 +9,7 @@ const bangers = Bangers({
 });
 
 export const metadata: Metadata = {
-  title: 'Hvem er mest sannsynlig?',
+  title: 'HVEM I STUA ?',
   description: 'Party game for venner',
 };
 

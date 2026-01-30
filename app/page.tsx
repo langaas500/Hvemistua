@@ -11,7 +11,7 @@ export default function Home() {
           className="text-5xl md:text-7xl font-bangers mb-4 text-center text-white tracking-wide"
           style={{ textShadow: '0 4px 15px rgba(0,0,0,0.6), 0 0 30px rgba(147,51,234,0.5)' }}
         >
-          Hvem er mest sannsynlig?
+          HVEM I STUA ?
         </h1>
         <p className="text-gray-300 mb-10 text-lg text-center">Party game for voksne</p>
 

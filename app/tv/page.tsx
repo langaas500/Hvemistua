@@ -16,6 +16,7 @@ interface Player {
 type QuestionTone = 'mild' | 'spicy' | 'drøy';
 type GameMode = 'standard' | '18+';
 type CheckoutStatus = 'open' | 'paid' | 'canceled';
+type GroupSize = 'small' | 'medium' | 'large';
 
 interface Checkout {
   id: string;
@@ -52,6 +53,19 @@ interface FinaleSummary {
   top3: Top3Entry[];
 }
 
+interface CondensedTop3Entry {
+  name: string;
+  avatarId: string;
+  votes: number;
+  percentage: number;
+}
+
+interface CondensedResults {
+  top3: CondensedTop3Entry[];
+  othersVotes: number;
+  othersPercentage: number;
+}
+
 interface GameState {
   phase: 'lobby' | 'question' | 'reveal' | 'gameover';
   players: Player[];
@@ -74,6 +88,10 @@ interface GameState {
   isPaused: boolean;
   pausedAt: number | null;
   pauseAccumulatedMs: number;
+  groupSize: GroupSize;
+  questionTime: number;
+  minPlayers: number;
+  maxPlayers: number;
 }
 
 interface RevealResult {
@@ -82,11 +100,23 @@ interface RevealResult {
   percentage: number;
   voteCount: Record<string, number>;
   rerollInfo: RerollInfo | null;
+  condensedResults?: CondensedResults;
 }
 
-const QUESTION_TIME = 20;
+const DEFAULT_QUESTION_TIME = 20;
 const INTERSTITIAL_TIME = 1000;
 const REVEAL_HOLD_TIME = 5000;
+const MAX_PLAYERS = 12;
+const MIN_PLAYERS = 3;
+
+// Subtle color variants for empty slots (same hue family, 8-12% opacity)
+const EMPTY_SLOT_COLORS = [
+  'bg-purple-500/8',
+  'bg-violet-500/10',
+  'bg-indigo-500/8',
+  'bg-purple-400/10',
+  'bg-violet-400/8',
+];
 
 function formatExpiryTime(until: number | null): string {
   if (!until) return '';
@@ -106,7 +136,7 @@ function TVLayout({ children, wide = false }: { children: React.ReactNode; wide?
       className="h-screen w-screen overflow-hidden flex flex-col items-center justify-center p-4 md:p-6 bg-cover bg-center bg-no-repeat"
       style={{ backgroundImage: "url('/front%20bg.png')" }}
     >
-      <div className={`relative bg-black/40 backdrop-blur-md rounded-2xl p-4 md:p-6 shadow-2xl border border-white/10 w-full max-h-[95vh] overflow-hidden ${wide ? 'max-w-6xl' : 'max-w-4xl'}`}>
+      <div className={`relative bg-black/65 backdrop-blur-md rounded-2xl p-4 md:p-6 shadow-2xl border border-white/10 w-full max-h-[95vh] overflow-hidden ${wide ? 'max-w-6xl' : 'max-w-4xl'}`}>
         {children}
       </div>
     </div>
@@ -115,7 +145,7 @@ function TVLayout({ children, wide = false }: { children: React.ReactNode; wide?
 
 export default function TVPage() {
   const [state, setState] = useState<GameState | null>(null);
-  const [timeLeft, setTimeLeft] = useState(QUESTION_TIME);
+  const [timeLeft, setTimeLeft] = useState(DEFAULT_QUESTION_TIME);
   const [revealResult, setRevealResult] = useState<RevealResult | null>(null);
   const [joinUrl, setJoinUrl] = useState<string>('');
   const [startError, setStartError] = useState<string>('');
@@ -132,6 +162,9 @@ export default function TVPage() {
   const currentQuestionRef = useRef<number>(-1);
   const revealTimerRef = useRef<NodeJS.Timeout | null>(null);
   const interstitialTimerRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Get dynamic question time from state
+  const questionTime = state?.questionTime ?? DEFAULT_QUESTION_TIME;
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -198,7 +231,7 @@ export default function TVPage() {
       }
 
       const elapsed = Math.floor(elapsedMs / 1000);
-      const remaining = Math.max(0, QUESTION_TIME - elapsed);
+      const remaining = Math.max(0, questionTime - elapsed);
       setTimeLeft(remaining);
 
       // Only trigger end if not paused
@@ -211,7 +244,7 @@ export default function TVPage() {
     updateTimer();
     const interval = setInterval(updateTimer, 100);
     return () => clearInterval(interval);
-  }, [state?.phase, state?.questionStartTime, state?.currentQuestion, state?.isPaused, state?.pausedAt, state?.pauseAccumulatedMs]);
+  }, [state?.phase, state?.questionStartTime, state?.currentQuestion, state?.isPaused, state?.pausedAt, state?.pauseAccumulatedMs, questionTime]);
 
   useEffect(() => {
     if (
@@ -326,7 +359,7 @@ export default function TVPage() {
       revealTimerRef.current = null;
     }
     setRevealResult(null);
-    setTimeLeft(QUESTION_TIME);
+    setTimeLeft(questionTime);
     await fetch('/api/game', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -435,7 +468,7 @@ export default function TVPage() {
       interstitialTimerRef.current = null;
     }
     setRevealResult(null);
-    setTimeLeft(QUESTION_TIME);
+    setTimeLeft(questionTime);
     setTvOverlay('none');
     hasEndedRef.current = false;
     await fetch('/api/game', {
@@ -596,12 +629,21 @@ export default function TVPage() {
 
   // LOBBY SCREEN
   if (state.phase === 'lobby') {
-    const slots = Array.from({ length: 8 }, (_, i) => {
+    const playerCount = state.players.length;
+    const maxPlayers = state.maxPlayers ?? MAX_PLAYERS;
+    const minPlayers = state.minPlayers ?? MIN_PLAYERS;
+
+    // Grid layout: always 2 rows, 6 columns for 7-12 players, otherwise adaptive
+    const useWideGrid = playerCount >= 7 || maxPlayers > 6;
+    const gridCols = useWideGrid ? 6 : Math.max(3, Math.min(4, maxPlayers));
+    const totalSlots = maxPlayers;
+
+    const slots = Array.from({ length: totalSlots }, (_, i) => {
       const player = state.players[i] || null;
       return { index: i, player };
     });
 
-    const canStart = state.players.length >= 4 && (localGameMode === 'standard' || state.unlockInfo?.unlocked);
+    const canStart = playerCount >= minPlayers && (localGameMode === 'standard' || state.unlockInfo?.unlocked);
 
     return (
       <>
@@ -611,129 +653,146 @@ export default function TVPage() {
             className="text-3xl md:text-5xl font-bangers mb-4 text-center text-white tracking-wide"
             style={{ textShadow: '0 4px 15px rgba(0,0,0,0.6), 0 0 30px rgba(147,51,234,0.5)' }}
           >
-            Hvem er mest sannsynlig?
+            HVEM I STUA ?
           </h1>
 
           <div className="flex gap-6 mb-4">
-            <div className="flex flex-col items-center justify-center flex-shrink-0">
+            {/* QR Join Section - Primary focus */}
+            <div className="flex flex-col items-center justify-center flex-shrink-0 bg-white/10 rounded-2xl p-4 border-2 border-purple-500/50 shadow-lg shadow-purple-500/20">
               {qrCodeUrl && (
-                <div className="bg-white p-2 rounded-xl mb-2">
-                  <img src={qrCodeUrl} alt="QR-kode" width={120} height={120} className="block" />
+                <div className="bg-white p-3 rounded-xl mb-3 shadow-md">
+                  <img src={qrCodeUrl} alt="QR-kode" width={130} height={130} className="block" />
                 </div>
               )}
-              <p className="text-sm text-gray-300 mb-1 text-center">Skann for å bli med</p>
-              <p className="text-xs font-mono text-blue-400 text-center break-all max-w-[150px]">
+              <p className="text-base font-semibold text-white mb-1 text-center">📱 Skann for å bli med</p>
+              <p className="text-xs text-purple-300 text-center mb-2">Én betaler – alle spiller</p>
+              <p className="text-xs font-mono text-blue-400 text-center break-all max-w-[160px] opacity-75">
                 {joinUrl || '/play'}
               </p>
             </div>
 
             <div className="flex-1">
               <h2 className="text-lg font-semibold mb-2 text-center text-white">
-                Spillere ({state.players.length}/8)
+                Spillere ({playerCount}/{maxPlayers})
               </h2>
-              <div className="grid grid-cols-4 gap-2">
-                {slots.map(({ index, player }) => (
-                  <div
-                    key={index}
-                    className={`rounded-lg px-2 py-2 flex items-center gap-1 min-h-[50px] ${
-                      player
-                        ? 'bg-white/15 border border-white/30'
-                        : 'border border-dashed border-white/20 bg-white/5'
-                    }`}
-                  >
-                    {player ? (
-                      <>
-                        <span className="text-2xl">{getAvatarIcon(player.avatarId)}</span>
-                        <span className="text-sm text-white font-medium truncate">{player.name}</span>
-                      </>
-                    ) : (
-                      <span className="text-gray-500 text-xs w-full text-center">Venter...</span>
-                    )}
-                  </div>
-                ))}
+              <div
+                className="grid gap-2"
+                style={{
+                  gridTemplateColumns: `repeat(${gridCols}, minmax(0, 1fr))`,
+                }}
+              >
+                {slots.map(({ index, player }) => {
+                  const isFirstEmpty = !player && index === playerCount;
+                  const emptyColorClass = EMPTY_SLOT_COLORS[index % EMPTY_SLOT_COLORS.length];
+
+                  return (
+                    <div
+                      key={index}
+                      className={`rounded-xl px-2 py-2 flex items-center gap-1 min-h-[48px] transition-all ${
+                        player
+                          ? 'bg-white/15 border border-white/30'
+                          : isFirstEmpty
+                          ? 'border-2 border-dashed border-purple-400/40 bg-purple-500/10 animate-pulse'
+                          : `border border-dashed border-white/15 ${emptyColorClass}`
+                      }`}
+                    >
+                      {player ? (
+                        <>
+                          <span className="text-xl">{getAvatarIcon(player.avatarId)}</span>
+                          <span className="text-sm text-white font-medium truncate">{player.name}</span>
+                        </>
+                      ) : (
+                        <span className={`text-xs w-full text-center ${isFirstEmpty ? 'text-purple-300' : 'text-gray-600'}`}>
+                          {isFirstEmpty ? '👆' : ''}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
             </div>
           </div>
 
           {/* Game Mode Selection */}
-          <div className="bg-white/10 rounded-xl p-3 mb-3 border border-white/20">
-            <div className="flex gap-3">
-              <button
-                onClick={() => handleGameModeChange('standard')}
-                className={`flex-1 p-3 rounded-lg border transition-all ${
-                  localGameMode === 'standard'
-                    ? 'bg-purple-600/30 border-purple-500'
-                    : 'bg-white/5 border-white/20 hover:bg-white/10'
-                }`}
-              >
-                <div className="text-2xl mb-1">🎉</div>
-                <div className="text-sm font-semibold text-white">Standard</div>
-              </button>
+          <div className="flex gap-3 mb-3">
+            {/* Standard Mode - Bright and prominent */}
+            <button
+              onClick={() => handleGameModeChange('standard')}
+              className={`flex-1 p-4 rounded-xl border-2 transition-all ${
+                localGameMode === 'standard'
+                  ? 'bg-gradient-to-br from-purple-600/50 to-blue-600/50 border-purple-400 shadow-lg shadow-purple-500/30'
+                  : 'bg-white/10 border-white/30 hover:bg-white/15 hover:border-white/40'
+              }`}
+            >
+              <div className="text-3xl mb-2">🎉</div>
+              <div className="text-base font-bold text-white">Standard</div>
+              <div className="text-xs text-gray-300 mt-1">Festklassiker</div>
+            </button>
 
-              <button
-                onClick={() => handleGameModeChange('18+')}
-                className={`flex-1 p-3 rounded-lg border transition-all ${
-                  localGameMode === '18+'
-                    ? 'bg-gradient-to-br from-pink-600/30 to-red-600/30 border-pink-500'
-                    : 'bg-white/5 border-white/20 hover:bg-white/10'
-                }`}
-              >
-                <div className="text-2xl mb-1">🔞</div>
-                <div className="text-sm font-semibold text-white">18+ Late Night</div>
-                {!state.unlockInfo?.unlocked && <div className="text-xs text-yellow-400">69 kr</div>}
-                {state.unlockInfo?.unlocked && (
-                  <div className="text-xs text-green-400">
-                    ✓ Til kl. {formatExpiryTime(state.unlockInfo.until)}
-                  </div>
-                )}
-              </button>
-            </div>
+            {/* 18+ Mode - Darker, premium feel */}
+            <button
+              onClick={() => handleGameModeChange('18+')}
+              className={`flex-1 p-4 rounded-xl border-2 transition-all relative overflow-hidden ${
+                localGameMode === '18+'
+                  ? 'bg-gradient-to-br from-pink-900/60 to-red-900/60 border-pink-500 shadow-lg shadow-pink-500/30'
+                  : 'bg-black/30 border-pink-900/50 hover:bg-black/40 hover:border-pink-800/60'
+              }`}
+            >
+              <div className="text-3xl mb-2">🔞</div>
+              <div className="text-base font-bold text-white">18+ Late Night</div>
+              {!state.unlockInfo?.unlocked && (
+                <div className="text-xs text-yellow-400 mt-1 font-semibold">🔓 69 kr</div>
+              )}
+              {state.unlockInfo?.unlocked && (
+                <div className="text-xs text-green-400 mt-1">
+                  ✓ Til kl. {formatExpiryTime(state.unlockInfo.until)}
+                </div>
+              )}
+            </button>
           </div>
 
-          {/* Settings (only for standard) */}
+          {/* Advanced Settings (de-emphasized, only for standard) */}
           {localGameMode === 'standard' && (
-            <div className="bg-white/10 rounded-xl p-3 mb-3 border border-white/20">
-              <div className="flex flex-wrap gap-6 items-center">
-                <div className="flex items-center gap-2">
-                  <span className="text-gray-300 text-sm">Tone:</span>
-                  <div className="flex gap-1">
-                    {(['mild', 'spicy', 'drøy'] as QuestionTone[]).map((tone) => (
-                      <button
-                        key={tone}
-                        onClick={() => handleToneChange(tone)}
-                        className={`px-3 py-1 rounded-lg text-sm font-medium transition-colors ${
-                          localTone === tone
-                            ? 'bg-purple-600 text-white'
-                            : 'bg-white/10 text-gray-300 hover:bg-white/20'
-                        }`}
-                      >
-                        {tone === 'mild' ? '😇' : tone === 'spicy' ? '🌶️' : '🔥'}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <span className="text-gray-300 text-sm">Par i rommet</span>
-                  <button
-                    type="button"
-                    onClick={() => handleCouplesSafeChange(!localCouplesSafe)}
-                    className={`relative w-12 h-6 rounded-full transition-all duration-300 ${
-                      localCouplesSafe
-                        ? 'bg-gradient-to-r from-pink-500 to-purple-600'
-                        : 'bg-gray-600'
-                    }`}
-                  >
-                    <span
-                      className={`absolute top-0.5 w-5 h-5 rounded-full bg-white shadow-md transition-all duration-300 flex items-center justify-center text-xs ${
-                        localCouplesSafe ? 'left-6' : 'left-0.5'
+            <div className="flex justify-center gap-6 mb-3 opacity-70 hover:opacity-100 transition-opacity">
+              <div className="flex items-center gap-2">
+                <span className="text-gray-400 text-xs uppercase tracking-wide">Tone</span>
+                <div className="flex gap-1">
+                  {(['mild', 'spicy', 'drøy'] as QuestionTone[]).map((tone) => (
+                    <button
+                      key={tone}
+                      onClick={() => handleToneChange(tone)}
+                      className={`px-2 py-1 rounded-md text-sm transition-colors ${
+                        localTone === tone
+                          ? 'bg-purple-600/80 text-white'
+                          : 'bg-white/5 text-gray-400 hover:bg-white/10'
                       }`}
                     >
-                      {localCouplesSafe ? '💕' : ''}
-                    </span>
-                  </button>
-                </label>
+                      {tone === 'mild' ? '😇' : tone === 'spicy' ? '🌶️' : '🔥'}
+                    </button>
+                  ))}
+                </div>
               </div>
+
+              <label className="flex items-center gap-2 cursor-pointer">
+                <span className="text-gray-400 text-xs uppercase tracking-wide">Par i rommet</span>
+                <button
+                  type="button"
+                  onClick={() => handleCouplesSafeChange(!localCouplesSafe)}
+                  className={`relative w-10 h-5 rounded-full transition-all duration-300 ${
+                    localCouplesSafe
+                      ? 'bg-gradient-to-r from-pink-500 to-purple-600'
+                      : 'bg-gray-700'
+                  }`}
+                >
+                  <span
+                    className={`absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-all duration-300 flex items-center justify-center text-[10px] ${
+                      localCouplesSafe ? 'left-5' : 'left-0.5'
+                    }`}
+                  >
+                    {localCouplesSafe ? '💕' : ''}
+                  </span>
+                </button>
+              </label>
             </div>
           )}
 
@@ -749,24 +808,28 @@ export default function TVPage() {
           {/* Start button */}
           <div className="flex flex-col items-center">
             {startError && <p className="text-red-400 text-sm mb-2">{startError}</p>}
-            {state.players.length >= 4 ? (
+            {playerCount >= minPlayers ? (
               <button
                 onClick={startGame}
                 disabled={!canStart}
-                className={`text-white text-xl font-bold py-3 px-8 rounded-xl transition-colors shadow-lg ${
+                className={`text-white text-xl font-bold py-4 px-10 rounded-xl transition-all shadow-lg ${
                   !canStart
                     ? 'bg-gray-600 cursor-not-allowed'
                     : localGameMode === '18+'
-                    ? 'bg-gradient-to-r from-pink-600 to-red-600 hover:from-pink-700 hover:to-red-700'
-                    : 'bg-green-600 hover:bg-green-700'
+                    ? 'bg-gradient-to-r from-pink-600 to-red-600 hover:from-pink-700 hover:to-red-700 hover:scale-105'
+                    : 'bg-green-600 hover:bg-green-700 hover:scale-105'
                 }`}
               >
-                {localGameMode === '18+' ? '🔞 Start 18+' : 'Start spill'}
+                {localGameMode === '18+' ? '🔞 Start 18+' : '🚀 Start spillet!'}
               </button>
             ) : (
-              <p className="text-yellow-400 text-lg">
-                Trenger {4 - state.players.length} spillere til
-              </p>
+              <div className="text-center">
+                <div className="flex items-center justify-center gap-2 text-yellow-400 text-lg mb-1">
+                  <span className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse"></span>
+                  Venter på {minPlayers - playerCount} {minPlayers - playerCount === 1 ? 'spiller' : 'spillere'} til
+                </div>
+                <p className="text-gray-500 text-sm">Minimum {minPlayers} spillere for å starte</p>
+              </div>
             )}
           </div>
         </TVLayout>
@@ -843,6 +906,8 @@ export default function TVPage() {
   // REVEAL SCREEN
   if (state.phase === 'reveal' && revealResult) {
     const rerollInfo = revealResult.rerollInfo || state.rerollInfo;
+    const isLargeGroup = state.groupSize === 'large';
+    const condensed = revealResult.condensedResults;
 
     return (
       <TVLayout>
@@ -881,26 +946,52 @@ export default function TVPage() {
           {revealResult.percentage}% av stemmene
         </p>
 
-        <div className="flex flex-wrap justify-center gap-2 mb-4">
-          {Object.entries(revealResult.voteCount)
-            .sort((a, b) => b[1] - a[1])
-            .map(([playerName, count]) => {
-              const player = state.players.find(p => p.name === playerName);
-              return (
-                <div
-                  key={playerName}
-                  className={`px-3 py-2 rounded-lg text-sm flex items-center gap-1 ${
-                    playerName === revealResult.winner
-                      ? 'bg-yellow-600'
-                      : 'bg-white/10 border border-white/20'
-                  }`}
-                >
-                  <span className="text-lg">{getAvatarIcon(player?.avatarId || '')}</span>
-                  <span className="text-white">{playerName}: {count}</span>
-                </div>
-              );
-            })}
-        </div>
+        {/* Vote results - condensed for large groups */}
+        {isLargeGroup && condensed ? (
+          <div className="flex flex-wrap justify-center gap-2 mb-4">
+            {condensed.top3.map((entry, idx) => (
+              <div
+                key={entry.name}
+                className={`px-3 py-2 rounded-lg text-sm flex items-center gap-1 ${
+                  idx === 0
+                    ? 'bg-yellow-600'
+                    : 'bg-white/10 border border-white/20'
+                }`}
+              >
+                <span className="text-lg">{getAvatarIcon(entry.avatarId)}</span>
+                <span className="text-white">{entry.name}: {entry.votes}</span>
+                <span className="text-gray-400 text-xs">({entry.percentage}%)</span>
+              </div>
+            ))}
+            {condensed.othersVotes > 0 && (
+              <div className="px-3 py-2 rounded-lg text-sm flex items-center gap-1 bg-white/5 border border-white/10">
+                <span className="text-gray-400">Andre: {condensed.othersVotes}</span>
+                <span className="text-gray-500 text-xs">({condensed.othersPercentage}%)</span>
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="flex flex-wrap justify-center gap-2 mb-4">
+            {Object.entries(revealResult.voteCount)
+              .sort((a, b) => b[1] - a[1])
+              .map(([playerName, count]) => {
+                const player = state.players.find(p => p.name === playerName);
+                return (
+                  <div
+                    key={playerName}
+                    className={`px-3 py-2 rounded-lg text-sm flex items-center gap-1 ${
+                      playerName === revealResult.winner
+                        ? 'bg-yellow-600'
+                        : 'bg-white/10 border border-white/20'
+                    }`}
+                  >
+                    <span className="text-lg">{getAvatarIcon(player?.avatarId || '')}</span>
+                    <span className="text-white">{playerName}: {count}</span>
+                  </div>
+                );
+              })}
+          </div>
+        )}
 
         <p className="text-gray-500 text-center text-xs mb-4">
           {state.isPaused ? 'Spillet er pauset' : 'Neste spørsmål kommer automatisk...'}

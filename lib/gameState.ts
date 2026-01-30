@@ -6,6 +6,10 @@ import { Question, QuestionTone, getDefault18PlusQuestions } from './questions';
 export type GamePhase = 'lobby' | 'question' | 'reveal' | 'gameover';
 export type GameMode = 'standard' | '18+';
 export type CheckoutStatus = 'open' | 'paid' | 'canceled';
+export type GroupSize = 'small' | 'medium' | 'large';
+
+export const MIN_PLAYERS = 3;
+export const MAX_PLAYERS = 12;
 
 export interface Avatar {
   id: string;
@@ -128,6 +132,24 @@ let gameState: GameState = {
   pausedAt: null,
   pauseAccumulatedMs: 0,
 };
+
+// Get group size based on player count
+export function getGroupSize(playerCount?: number): GroupSize {
+  const count = playerCount ?? gameState.players.length;
+  if (count <= 6) return 'small';
+  if (count <= 9) return 'medium';
+  return 'large';
+}
+
+// Get question time based on group size
+export function getQuestionTime(groupSize?: GroupSize): number {
+  const size = groupSize ?? getGroupSize();
+  switch (size) {
+    case 'small': return 20;
+    case 'medium': return 18;
+    case 'large': return 15;
+  }
+}
 
 // Check if 18+ is currently unlocked (within 24h window)
 export function is18PlusUnlocked(): boolean {
@@ -398,7 +420,7 @@ export function addPlayer(name: string): { success: boolean; error?: string; tok
   const trimmedName = name.trim();
 
   if (!trimmedName) return { success: false, error: 'Navn kan ikke være tomt' };
-  if (gameState.players.length >= 8) return { success: false, error: 'Maks 8 spillere' };
+  if (gameState.players.length >= MAX_PLAYERS) return { success: false, error: `Maks ${MAX_PLAYERS} spillere` };
 
   const nameLower = trimmedName.toLowerCase();
   if (gameState.players.find(p => p.name.toLowerCase() === nameLower)) {
@@ -461,13 +483,41 @@ export function setSettings(tone: QuestionTone, couplesSafe: boolean): { success
   return { success: true };
 }
 
+// Smart question selection based on group size
+function selectQuestionsForGroupSize(questions: Question[], groupSize: GroupSize): Question[] {
+  // For large groups, prefer clearer/more direct questions (spicy/drøy tones)
+  // For small groups, allow more subtle/personal questions (mild tones)
+  const shuffled = [...questions].sort(() => Math.random() - 0.5);
+
+  if (groupSize === 'large') {
+    // Sort to prefer spicy/drøy questions for large groups
+    shuffled.sort((a, b) => {
+      const scoreA = a.tone === 'drøy' ? 2 : a.tone === 'spicy' ? 1 : 0;
+      const scoreB = b.tone === 'drøy' ? 2 : b.tone === 'spicy' ? 1 : 0;
+      // Add randomness to prevent deterministic ordering
+      return (scoreB - scoreA) + (Math.random() - 0.5) * 0.5;
+    });
+  } else if (groupSize === 'small') {
+    // For small groups, prefer mild questions first (more personal)
+    shuffled.sort((a, b) => {
+      const scoreA = a.tone === 'mild' ? 2 : a.tone === 'spicy' ? 1 : 0;
+      const scoreB = b.tone === 'mild' ? 2 : b.tone === 'spicy' ? 1 : 0;
+      return (scoreB - scoreA) + (Math.random() - 0.5) * 0.5;
+    });
+  }
+  // Medium groups get balanced random selection
+
+  return shuffled;
+}
+
 export function startGame(questions: Question[]): { success: boolean; error?: string } {
-  if (gameState.players.length < 4) return { success: false, error: 'Trenger minst 4 spillere' };
+  if (gameState.players.length < MIN_PLAYERS) return { success: false, error: `Trenger minst ${MIN_PLAYERS} spillere` };
 
   if (gameState.gameMode === '18+' && !is18PlusUnlocked()) {
     return { success: false, error: '18+ må låses opp først' };
   }
 
+  const groupSize = getGroupSize();
   let selectedTexts: string[] = [];
 
   if (gameState.gameMode === '18+') {
@@ -493,8 +543,9 @@ export function startGame(questions: Question[]): { success: boolean; error?: st
     if (gameState.couplesSafe) filtered = filtered.filter(q => q.risk === 'safe');
     if (filtered.length < 20) return { success: false, error: 'For få spørsmål i denne kombinasjonen' };
 
-    const shuffled = [...filtered].sort(() => Math.random() - 0.5);
-    selectedTexts = shuffled.slice(0, 20).map(q => q.text);
+    // Apply smart question selection based on group size
+    const smartSorted = selectQuestionsForGroupSize(filtered, groupSize);
+    selectedTexts = smartSorted.slice(0, 20).map(q => q.text);
   }
 
   gameState.selectedQuestions = selectedTexts;
@@ -532,7 +583,21 @@ export function submitVote(token: string, votedFor: string): { success: boolean;
   return { success: true };
 }
 
-export function endVoting(): { winner: string; winnerAvatarId: string; percentage: number; voteCount: Record<string, number>; rerollInfo: RerollInfo | null } {
+export interface RevealResult {
+  winner: string;
+  winnerAvatarId: string;
+  percentage: number;
+  voteCount: Record<string, number>;
+  rerollInfo: RerollInfo | null;
+  // For large groups, condensed results
+  condensedResults?: {
+    top3: Array<{ name: string; avatarId: string; votes: number; percentage: number }>;
+    othersVotes: number;
+    othersPercentage: number;
+  };
+}
+
+export function endVoting(): RevealResult {
   gameState.rerollInfo = null;
 
   const voteCount: Record<string, number> = {};
@@ -595,7 +660,31 @@ export function endVoting(): { winner: string; winnerAvatarId: string; percentag
 
   gameState.phase = 'reveal';
 
-  return { winner: finalWinner, winnerAvatarId, percentage, voteCount, rerollInfo: gameState.rerollInfo };
+  // Create condensed results for large groups
+  const groupSize = getGroupSize();
+  let condensedResults: RevealResult['condensedResults'] | undefined;
+
+  if (groupSize === 'large') {
+    const sorted = Object.entries(voteCount)
+      .sort((a, b) => b[1] - a[1]);
+
+    const top3 = sorted.slice(0, 3).map(([name, votes]) => {
+      const player = gameState.players.find(p => p.name === name);
+      return {
+        name,
+        avatarId: player?.avatarId || AVATARS[0].id,
+        votes,
+        percentage: totalVotes > 0 ? Math.round((votes / totalVotes) * 100) : 0,
+      };
+    });
+
+    const othersVotes = sorted.slice(3).reduce((sum, [, votes]) => sum + votes, 0);
+    const othersPercentage = totalVotes > 0 ? Math.round((othersVotes / totalVotes) * 100) : 0;
+
+    condensedResults = { top3, othersVotes, othersPercentage };
+  }
+
+  return { winner: finalWinner, winnerAvatarId, percentage, voteCount, rerollInfo: gameState.rerollInfo, condensedResults };
 }
 
 export function nextQuestion(): void {

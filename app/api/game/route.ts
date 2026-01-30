@@ -23,6 +23,10 @@ import {
   pauseGame,
   resumeGame,
   nextQuestionNow,
+  getGroupSize,
+  getQuestionTime,
+  MIN_PLAYERS,
+  MAX_PLAYERS,
 } from '@/lib/gameState';
 import { questions } from '@/lib/questions';
 
@@ -32,7 +36,18 @@ export async function GET() {
   const avatars = getAvatars();
   const finaleSummary = getFinaleStats();
   const unlockInfo = getUnlockInfo();
-  return NextResponse.json({ ...state, avatars, finaleSummary, unlockInfo });
+  const groupSize = getGroupSize();
+  const questionTime = getQuestionTime();
+  return NextResponse.json({
+    ...state,
+    avatars,
+    finaleSummary,
+    unlockInfo,
+    groupSize,
+    questionTime,
+    minPlayers: MIN_PLAYERS,
+    maxPlayers: MAX_PLAYERS,
+  });
 }
 
 // POST - perform game actions

@@ -41,11 +41,13 @@ interface GameState {
   isPaused: boolean;
   pausedAt: number | null;
   pauseAccumulatedMs: number;
+  questionTime: number;
+  maxPlayers: number;
 }
 
 type Step = 'loading' | 'join' | 'avatar' | 'game';
 
-const QUESTION_TIME = 20;
+const DEFAULT_QUESTION_TIME = 20;
 
 export default function PlayPage() {
   const [state, setState] = useState<GameState | null>(null);
@@ -58,7 +60,10 @@ export default function PlayPage() {
   const [error, setError] = useState('');
   const [hasVoted, setHasVoted] = useState(false);
   const [votedFor, setVotedFor] = useState('');
-  const [timeLeft, setTimeLeft] = useState(QUESTION_TIME);
+  const [timeLeft, setTimeLeft] = useState(DEFAULT_QUESTION_TIME);
+
+  // Get dynamic question time from state
+  const questionTime = state?.questionTime ?? DEFAULT_QUESTION_TIME;
 
   const savedNameRef = useRef<string>('');
   const savedAvatarRef = useRef<string>('');
@@ -156,14 +161,14 @@ export default function PlayPage() {
       }
 
       const elapsed = Math.floor(elapsedMs / 1000);
-      const remaining = Math.max(0, QUESTION_TIME - elapsed);
+      const remaining = Math.max(0, questionTime - elapsed);
       setTimeLeft(remaining);
     };
 
     updateTimer();
     const interval = setInterval(updateTimer, 100);
     return () => clearInterval(interval);
-  }, [state?.phase, state?.questionStartTime, state?.currentQuestion, state?.isPaused, state?.pausedAt, state?.pauseAccumulatedMs]);
+  }, [state?.phase, state?.questionStartTime, state?.currentQuestion, state?.isPaused, state?.pausedAt, state?.pauseAccumulatedMs, questionTime]);
 
   const handleJoin = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -437,7 +442,7 @@ export default function PlayPage() {
 
         <div className="bg-gray-800 rounded-xl p-6 w-full max-w-sm mb-8">
           <h2 className="text-lg font-semibold mb-4">
-            Spillere ({state.players.length}/8)
+            Spillere ({state.players.length}/{state.maxPlayers ?? 12})
           </h2>
           <div className="flex flex-wrap gap-2">
             {state.players.map((p) => (
